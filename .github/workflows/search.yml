@@ -23,7 +23,7 @@ on:
       max_regions:
         description: Maximum regions; 0 means all
         required: true
-        default: "100"
+        default: "0"
 
 permissions:
   contents: read
@@ -73,7 +73,7 @@ jobs:
         if: github.event_name == 'issues' || github.event_name == 'issue_comment' || inputs.process_open_issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_regions || '300' }}
+          DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_regions || '0' }}
           DGSEARCH_MAX_COMMENT_RESULTS: "50"
         run: python scripts/process_issues.py
       - name: Upload results

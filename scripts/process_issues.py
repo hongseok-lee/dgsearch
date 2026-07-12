@@ -14,7 +14,7 @@ from dgsearch.listings import is_tradable
 API = "https://api.github.com"
 TOKEN = os.getenv("GITHUB_TOKEN", "")
 REPOSITORY = os.getenv("GITHUB_REPOSITORY", "")
-MAX_REGIONS = os.getenv("DGSEARCH_MAX_REGIONS", "300")
+MAX_REGIONS = os.getenv("DGSEARCH_MAX_REGIONS", "0")
 MAX_RESULTS = int(os.getenv("DGSEARCH_MAX_COMMENT_RESULTS", "50"))
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
@@ -121,6 +121,10 @@ def cell(value) -> str:
     return str(value or "").replace("|", "\\|").replace("\n", " ").strip()
 
 
+def region_scope_label() -> str:
+    return "전체" if int(MAX_REGIONS) == 0 else f"최대 {MAX_REGIONS}개"
+
+
 def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
     shown = items[:MAX_RESULTS]
     lines = [
@@ -128,7 +132,7 @@ def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
         f"`{keyword}` 서울·경기 검색 결과입니다.",
         "",
         f"- 고유 매물: {len(items)}개",
-        f"- 조회 지역 상한: {MAX_REGIONS}개",
+        f"- 조회 지역: {region_scope_label()}",
         f"- 댓글 표시: 최근 갱신 {len(shown)}개",
         "",
         "| 가격 | 지역 | 매물 |",

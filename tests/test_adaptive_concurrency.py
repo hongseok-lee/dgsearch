@@ -69,3 +69,20 @@ def test_clean_window_recovers_one_step_at_a_time():
 
     assert slot.concurrency == 3
     assert slot.delay == 0.8
+
+
+def test_clean_windows_can_recover_to_sixteen():
+    slot = Slot(concurrency=15, delay=1)
+    instance = middleware(
+        slot,
+        max_concurrency=16,
+        window_size=10,
+        min_samples=5,
+        failure_rate=0.2,
+        recovery_rate=0,
+    )
+    for _ in range(20):
+        request, result = response(200)
+        instance.process_response(request, result)
+
+    assert slot.concurrency == 16

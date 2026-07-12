@@ -1,10 +1,13 @@
+import asyncio
+
 from scripts.process_issues import (
+    consume_progress,
     format_comment,
     is_relevant,
     latest_source_for_issue,
     main,
     marker,
-    publish_results_and_close,
+    progress_label,
     region_scope_label,
     sources_for_issue,
     unique_results,
@@ -100,20 +103,27 @@ def test_trusted_user_comment_becomes_search_source():
     assert latest_source_for_issue(issue, comments) == ("comment", 20, "아이폰 17 프로")
 
 
-def test_publish_results_comments_before_closing(monkeypatch):
-    calls = []
-    monkeypatch.setattr("scripts.process_issues.REPOSITORY", "owner/repo")
-    monkeypatch.setattr(
-        "scripts.process_issues.api",
-        lambda method, path, payload=None: calls.append((method, path, payload)),
-    )
+def test_progress_labels():
+    assert progress_label(None, None, False) == "지역 목록 준비 중"
+    assert progress_label(3, 10, False) == "3/10"
+    assert progress_label(10, 10, True) == "완료 (10/10)"
 
-    publish_results_and_close(7, "result table")
 
-    assert calls == [
-        ("POST", "/repos/owner/repo/issues/7/comments", {"body": "result table"}),
-        ("PATCH", "/repos/owner/repo/issues/7", {"state": "closed"}),
-    ]
+def test_consume_progress_reads_only_new_lines(tmp_path):
+    path = tmp_path / "progress.jsonl"
+    path.write_text('{"completed": 1}\n', encoding="utf-8")
+    events = []
+
+    async def collect(event):
+        events.append(event)
+
+    position = asyncio.run(consume_progress(path, 0, collect))
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write('{"completed": 2}\n')
+
+    asyncio.run(consume_progress(path, position, collect))
+
+    assert events == [{"completed": 1}, {"completed": 2}]
 
 
 def test_open_issue_is_searched_even_when_old_result_marker_exists(monkeypatch):
@@ -129,29 +139,42 @@ def test_open_issue_is_searched_even_when_old_result_marker_exists(monkeypatch):
         "author_association": "NONE",
         "user": {"login": "github-actions[bot]"},
     }
-    crawls = []
-    publications = []
+    calls = []
+    item = {
+        "id": "live",
+        "title": "갤럭시 폴드7",
+        "status": "Ongoing",
+        "price": "1000000",
+        "region": {"name": "부암동"},
+        "href": "https://example.com/live",
+    }
 
-    def fake_api(method, path, payload=None):
+    async def fake_api(session, method, path, payload=None):
         if path.endswith("/issues?state=open&sort=created&direction=asc&per_page=100"):
             return [issue]
         if path.endswith("/issues/7/comments?per_page=100"):
             return [old_result]
-        raise AssertionError((method, path, payload))
+        calls.append((method, path, payload))
+        if method == "POST" and path.endswith("/issues/7/comments"):
+            return {"id": 99}
+        return {}
+
+    async def fake_crawl(keyword, issue_number, on_progress):
+        await on_progress({"completed": 1, "total": 2, "articles": [item], "error": None})
+        await on_progress({"completed": 2, "total": 2, "articles": [item], "error": None})
+        return [item, item]
 
     monkeypatch.setattr("scripts.process_issues.TOKEN", "token")
     monkeypatch.setattr("scripts.process_issues.REPOSITORY", "owner/repo")
     monkeypatch.setattr("scripts.process_issues.api", fake_api)
-    monkeypatch.setattr(
-        "scripts.process_issues.crawl",
-        lambda keyword, issue_number: crawls.append((keyword, issue_number)) or [],
-    )
-    monkeypatch.setattr(
-        "scripts.process_issues.publish_results_and_close",
-        lambda issue_number, body: publications.append((issue_number, body)),
-    )
+    monkeypatch.setattr("scripts.process_issues.crawl_incrementally", fake_crawl)
 
-    main()
+    asyncio.run(main())
 
-    assert crawls == [("갤럭시 폴드7", 7)]
-    assert publications[0][0] == 7
+    assert calls[0][0:2] == ("POST", "/repos/owner/repo/issues/7/comments")
+    updates = [call for call in calls if call[1] == "/repos/owner/repo/issues/comments/99"]
+    assert len(updates) == 3
+    assert "- 고유 매물: 1개" in updates[0][2]["body"]
+    assert "- 진행: 1/2" in updates[0][2]["body"]
+    assert "- 진행: 완료 (2/2)" in updates[-1][2]["body"]
+    assert calls[-1] == ("PATCH", "/repos/owner/repo/issues/7", {"state": "closed"})

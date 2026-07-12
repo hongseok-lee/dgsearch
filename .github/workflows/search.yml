@@ -1,6 +1,8 @@
 name: Search Daangn regions
 
 on:
+  issue_comment:
+    types: [created]
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -33,6 +35,13 @@ concurrency:
 
 jobs:
   search:
+    if: >-
+      github.event_name != 'issue_comment' ||
+      (!github.event.issue.pull_request && (
+        github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR'
+      ))
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
@@ -55,10 +64,10 @@ jobs:
             -a "provinces=$SEARCH_PROVINCES" \
             -a "max_regions=$SEARCH_MAX_REGIONS"
       - name: Process oldest unhandled open issue
-        if: github.event_name == 'schedule' || inputs.process_open_issue
+        if: github.event_name == 'schedule' || github.event_name == 'issue_comment' || inputs.process_open_issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'schedule' && '300' || inputs.max_regions }}
+          DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_regions || '300' }}
           DGSEARCH_MAX_COMMENT_RESULTS: "50"
         run: python scripts/process_issues.py
       - name: Upload results

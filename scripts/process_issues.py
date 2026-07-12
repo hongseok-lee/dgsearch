@@ -14,6 +14,7 @@ TOKEN = os.getenv("GITHUB_TOKEN", "")
 REPOSITORY = os.getenv("GITHUB_REPOSITORY", "")
 MAX_REGIONS = os.getenv("DGSEARCH_MAX_REGIONS", "300")
 MAX_RESULTS = int(os.getenv("DGSEARCH_MAX_COMMENT_RESULTS", "50"))
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
 def api(method: str, path: str, payload=None):
@@ -41,14 +42,36 @@ def keyword_from_issue(issue: dict) -> str:
     return " ".join((issue.get("body") or "").split())[:100]
 
 
-def marker(issue: dict, keyword: str) -> str:
-    digest = hashlib.sha256(f"{issue['id']}:{keyword}".encode()).hexdigest()[:16]
+def marker(source_kind: str, source_id: int, keyword: str) -> str:
+    digest = hashlib.sha256(f"{source_kind}:{source_id}:{keyword}".encode()).hexdigest()[:16]
     return f"<!-- dgsearch:{digest} -->"
 
 
-def already_processed(issue_number: int, expected_marker: str) -> bool:
-    comments = api("GET", f"/repos/{REPOSITORY}/issues/{issue_number}/comments?per_page=100")
-    return any(expected_marker in (comment.get("body") or "") for comment in comments)
+def legacy_issue_marker(issue_id: int, keyword: str) -> str:
+    digest = hashlib.sha256(f"{issue_id}:{keyword}".encode()).hexdigest()[:16]
+    return f"<!-- dgsearch:{digest} -->"
+
+
+def sources_for_issue(issue: dict, comments: list[dict]):
+    sources = []
+    if issue.get("author_association") in TRUSTED_ASSOCIATIONS:
+        keyword = keyword_from_issue(issue)
+        if keyword:
+            sources.append(("issue", issue["id"], keyword))
+
+    for comment in comments:
+        body = comment.get("body") or ""
+        author = (comment.get("user") or {}).get("login", "")
+        if (
+            comment.get("author_association") not in TRUSTED_ASSOCIATIONS
+            or author == "github-actions[bot]"
+            or "<!-- dgsearch:" in body
+        ):
+            continue
+        keyword = " ".join(body.split())[:100]
+        if keyword:
+            sources.append(("comment", comment["id"], keyword))
+    return sources
 
 
 def crawl(keyword: str, issue_number: int) -> list[dict]:
@@ -126,6 +149,15 @@ def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
     return "\n".join(lines)
 
 
+def publish_results_and_close(issue_number: int, body: str):
+    api("POST", f"/repos/{REPOSITORY}/issues/{issue_number}/comments", {"body": body})
+    close_issue(issue_number)
+
+
+def close_issue(issue_number: int):
+    api("PATCH", f"/repos/{REPOSITORY}/issues/{issue_number}", {"state": "closed"})
+
+
 def main():
     if not TOKEN or not REPOSITORY:
         raise RuntimeError("GITHUB_TOKEN and GITHUB_REPOSITORY are required")
@@ -133,18 +165,30 @@ def main():
     for issue in issues:
         if "pull_request" in issue:
             continue
-        keyword = keyword_from_issue(issue)
-        if not keyword:
-            continue
-        issue_marker = marker(issue, keyword)
-        if already_processed(issue["number"], issue_marker):
-            continue
+        comments = api("GET", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments?per_page=100")
+        comment_bodies = [comment.get("body") or "" for comment in comments]
+        processed_marker_seen = False
+        for source_kind, source_id, keyword in sources_for_issue(issue, comments):
+            source_marker = marker(source_kind, source_id, keyword)
+            accepted_markers = [source_marker]
+            if source_kind == "issue":
+                accepted_markers.append(legacy_issue_marker(source_id, keyword))
+            if any(any(value in body for value in accepted_markers) for body in comment_bodies):
+                processed_marker_seen = True
+                continue
 
-        items = unique_results(crawl(keyword, issue["number"]), keyword)
-        body = format_comment(keyword, items, issue_marker)
-        api("POST", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments", {"body": body})
-        print(f"processed issue #{issue['number']}: {len(items)} unique results")
-        return
+            items = unique_results(crawl(keyword, issue["number"]), keyword)
+            body = format_comment(keyword, items, source_marker)
+            publish_results_and_close(issue["number"], body)
+            print(
+                f"processed {source_kind} {source_id} on issue #{issue['number']}: "
+                f"{len(items)} unique results"
+            )
+            return
+        if processed_marker_seen:
+            close_issue(issue["number"])
+            print(f"closed previously processed issue #{issue['number']}")
+            return
     print("no unprocessed open issues")
 
 

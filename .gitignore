@@ -1,0 +1,12 @@
+.venv/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.scrapy/
+state/
+output/
+*.csv
+*.json
+*.jsonl
+!regions.example.json

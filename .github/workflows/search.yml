@@ -1,0 +1,66 @@
+name: Search Daangn regions
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      query:
+        description: Search phrase
+        required: true
+        default: 갤럭시 폴드 7
+      provinces:
+        description: Comma-separated provinces
+        required: true
+        default: 서울특별시,경기도
+      max_regions:
+        description: Maximum regions; 0 means all
+        required: true
+        default: "100"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dgsearch-issue-worker
+  cancel-in-progress: false
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install .
+      - name: Crawl
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          SEARCH_QUERY: ${{ inputs.query }}
+          SEARCH_PROVINCES: ${{ inputs.provinces }}
+          SEARCH_MAX_REGIONS: ${{ inputs.max_regions }}
+        run: |
+          scrapy crawl daangn \
+            -a "query=$SEARCH_QUERY" \
+            -a "provinces=$SEARCH_PROVINCES" \
+            -a "max_regions=$SEARCH_MAX_REGIONS"
+      - name: Process oldest unhandled open issue
+        if: github.event_name == 'schedule'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          DGSEARCH_MAX_REGIONS: "300"
+          DGSEARCH_MAX_COMMENT_RESULTS: "50"
+        run: python scripts/process_issues.py
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dgsearch-${{ github.run_id }}
+          path: output/
+          if-no-files-found: warn
+          retention-days: 3

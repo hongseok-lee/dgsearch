@@ -58,7 +58,7 @@ jobs:
         if: github.event_name == 'schedule' || inputs.process_open_issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          DGSEARCH_MAX_REGIONS: "300"
+          DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'schedule' && '300' || inputs.max_regions }}
           DGSEARCH_MAX_COMMENT_RESULTS: "50"
         run: python scripts/process_issues.py
       - name: Upload results

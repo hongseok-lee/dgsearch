@@ -5,6 +5,8 @@ from urllib.parse import urlencode
 
 import scrapy
 
+from dgsearch.listings import is_tradable
+
 
 SEOUL = [
     "종로구", "중구", "용산구", "성동구", "광진구", "동대문구", "중랑구", "성북구",
@@ -122,6 +124,8 @@ class DaangnSpider(scrapy.Spider):
             return
 
         for article in response.json().get("fleamarketArticles", []):
+            if not is_tradable(article):
+                continue
             article["matchedSearchRegion"] = {
                 "id": region["id"],
                 "name": region["name"],

@@ -20,7 +20,11 @@ def test_format_comment_uses_markdown_table(monkeypatch):
 
 
 def test_relevance_requires_every_keyword_token():
-    fold5 = {"id": "5", "title": "삼성 갤럭시 Z 폴드5 512GB", "content": ""}
+    fold5 = {
+        "id": "5",
+        "title": "삼성 갤럭시 Z 폴드5 512GB",
+        "content": "갤럭시 폴드 7도 검색해 보세요",
+    }
     fold7 = {"id": "7", "title": "삼성 갤럭시 Z 폴드7 256GB", "content": ""}
 
     assert not is_relevant(fold5, "갤럭시 폴드 7")

@@ -72,7 +72,7 @@ def crawl(keyword: str, issue_number: int) -> list[dict]:
 
 
 def is_relevant(item: dict, keyword: str) -> bool:
-    haystack = " ".join((item.get("title") or "", item.get("content") or "")).casefold()
+    haystack = (item.get("title") or "").casefold()
     tokens = [token.casefold() for token in keyword.split() if token.strip()]
     return bool(tokens) and all(token in haystack for token in tokens)
 

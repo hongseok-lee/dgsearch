@@ -47,11 +47,6 @@ def marker(source_kind: str, source_id: int, keyword: str) -> str:
     return f"<!-- dgsearch:{digest} -->"
 
 
-def legacy_issue_marker(issue_id: int, keyword: str) -> str:
-    digest = hashlib.sha256(f"{issue_id}:{keyword}".encode()).hexdigest()[:16]
-    return f"<!-- dgsearch:{digest} -->"
-
-
 def sources_for_issue(issue: dict, comments: list[dict]):
     sources = []
     if issue.get("author_association") in TRUSTED_ASSOCIATIONS:
@@ -72,6 +67,11 @@ def sources_for_issue(issue: dict, comments: list[dict]):
         if keyword:
             sources.append(("comment", comment["id"], keyword))
     return sources
+
+
+def latest_source_for_issue(issue: dict, comments: list[dict]):
+    sources = sources_for_issue(issue, comments)
+    return sources[-1] if sources else None
 
 
 def crawl(keyword: str, issue_number: int) -> list[dict]:
@@ -166,29 +166,18 @@ def main():
         if "pull_request" in issue:
             continue
         comments = api("GET", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments?per_page=100")
-        comment_bodies = [comment.get("body") or "" for comment in comments]
-        processed_marker_seen = False
-        for source_kind, source_id, keyword in sources_for_issue(issue, comments):
-            source_marker = marker(source_kind, source_id, keyword)
-            accepted_markers = [source_marker]
-            if source_kind == "issue":
-                accepted_markers.append(legacy_issue_marker(source_id, keyword))
-            if any(any(value in body for value in accepted_markers) for body in comment_bodies):
-                processed_marker_seen = True
-                continue
-
-            items = unique_results(crawl(keyword, issue["number"]), keyword)
-            body = format_comment(keyword, items, source_marker)
-            publish_results_and_close(issue["number"], body)
-            print(
-                f"processed {source_kind} {source_id} on issue #{issue['number']}: "
-                f"{len(items)} unique results"
-            )
-            return
-        if processed_marker_seen:
-            close_issue(issue["number"])
-            print(f"closed previously processed issue #{issue['number']}")
-            return
+        source = latest_source_for_issue(issue, comments)
+        if source is None:
+            continue
+        source_kind, source_id, keyword = source
+        items = unique_results(crawl(keyword, issue["number"]), keyword)
+        body = format_comment(keyword, items, marker(source_kind, source_id, keyword))
+        publish_results_and_close(issue["number"], body)
+        print(
+            f"processed open issue #{issue['number']} from {source_kind} {source_id}: "
+            f"{len(items)} unique results"
+        )
+        return
     print("no unprocessed open issues")
 
 

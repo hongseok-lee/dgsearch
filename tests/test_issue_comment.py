@@ -1,7 +1,8 @@
 from scripts.process_issues import (
     format_comment,
     is_relevant,
-    legacy_issue_marker,
+    latest_source_for_issue,
+    main,
     marker,
     publish_results_and_close,
     sources_for_issue,
@@ -68,7 +69,7 @@ def test_trusted_user_comment_becomes_search_source():
         ("comment", 20, "아이폰 17 프로"),
     ]
     assert marker("comment", 20, "아이폰 17 프로") != marker("comment", 23, "아이폰 17 프로")
-    assert legacy_issue_marker(10, "첫 검색") == "<!-- dgsearch:8d6eff7f2e0cfaae -->"
+    assert latest_source_for_issue(issue, comments) == ("comment", 20, "아이폰 17 프로")
 
 
 def test_publish_results_comments_before_closing(monkeypatch):
@@ -85,3 +86,44 @@ def test_publish_results_comments_before_closing(monkeypatch):
         ("POST", "/repos/owner/repo/issues/7/comments", {"body": "result table"}),
         ("PATCH", "/repos/owner/repo/issues/7", {"state": "closed"}),
     ]
+
+
+def test_open_issue_is_searched_even_when_old_result_marker_exists(monkeypatch):
+    issue = {
+        "id": 10,
+        "number": 7,
+        "body": "갤럭시 폴드7",
+        "author_association": "OWNER",
+    }
+    old_result = {
+        "id": 20,
+        "body": "<!-- dgsearch:old-result -->",
+        "author_association": "NONE",
+        "user": {"login": "github-actions[bot]"},
+    }
+    crawls = []
+    publications = []
+
+    def fake_api(method, path, payload=None):
+        if path.endswith("/issues?state=open&sort=created&direction=asc&per_page=100"):
+            return [issue]
+        if path.endswith("/issues/7/comments?per_page=100"):
+            return [old_result]
+        raise AssertionError((method, path, payload))
+
+    monkeypatch.setattr("scripts.process_issues.TOKEN", "token")
+    monkeypatch.setattr("scripts.process_issues.REPOSITORY", "owner/repo")
+    monkeypatch.setattr("scripts.process_issues.api", fake_api)
+    monkeypatch.setattr(
+        "scripts.process_issues.crawl",
+        lambda keyword, issue_number: crawls.append((keyword, issue_number)) or [],
+    )
+    monkeypatch.setattr(
+        "scripts.process_issues.publish_results_and_close",
+        lambda issue_number, body: publications.append((issue_number, body)),
+    )
+
+    main()
+
+    assert crawls == [("갤럭시 폴드7", 7)]
+    assert publications[0][0] == 7

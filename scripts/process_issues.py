@@ -8,6 +8,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from dgsearch.listings import is_tradable
+
 
 API = "https://api.github.com"
 TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -103,7 +105,7 @@ def is_relevant(item: dict, keyword: str) -> bool:
 def unique_results(items: list[dict], keyword: str) -> list[dict]:
     unique = {}
     for item in items:
-        if not is_relevant(item, keyword):
+        if not is_tradable(item) or not is_relevant(item, keyword):
             continue
         key = item.get("id") or item.get("href")
         if key and key not in unique:

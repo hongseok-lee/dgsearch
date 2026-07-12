@@ -8,6 +8,7 @@ from scripts.process_issues import (
     sources_for_issue,
     unique_results,
 )
+from dgsearch.listings import is_tradable
 
 
 def test_format_comment_uses_markdown_table(monkeypatch):
@@ -33,12 +34,29 @@ def test_relevance_requires_every_keyword_token():
         "id": "5",
         "title": "삼성 갤럭시 Z 폴드5 512GB",
         "content": "갤럭시 폴드 7도 검색해 보세요",
+        "status": "Ongoing",
     }
-    fold7 = {"id": "7", "title": "삼성 갤럭시 Z 폴드7 256GB", "content": ""}
+    fold7 = {
+        "id": "7",
+        "title": "삼성 갤럭시 Z 폴드7 256GB",
+        "content": "",
+        "status": "Ongoing",
+    }
 
     assert not is_relevant(fold5, "갤럭시 폴드 7")
     assert is_relevant(fold7, "갤럭시 폴드 7")
     assert unique_results([fold5, fold7], "갤럭시 폴드 7") == [fold7]
+
+
+def test_only_ongoing_listings_are_tradable():
+    assert is_tradable({"status": "Ongoing"})
+    assert not is_tradable({"status": "Reserved"})
+    assert not is_tradable({"status": "SoldOut"})
+    assert not is_tradable({})
+
+    sold = {"id": "sold", "title": "갤럭시 폴드7", "status": "SoldOut"}
+    ongoing = {"id": "live", "title": "갤럭시 폴드7", "status": "Ongoing"}
+    assert unique_results([sold, ongoing], "갤럭시 폴드7") == [ongoing]
 
 
 def test_trusted_user_comment_becomes_search_source():

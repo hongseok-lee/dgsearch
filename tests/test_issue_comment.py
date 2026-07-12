@@ -3,6 +3,7 @@ from scripts.process_issues import (
     is_relevant,
     legacy_issue_marker,
     marker,
+    publish_results_and_close,
     sources_for_issue,
     unique_results,
 )
@@ -68,3 +69,19 @@ def test_trusted_user_comment_becomes_search_source():
     ]
     assert marker("comment", 20, "아이폰 17 프로") != marker("comment", 23, "아이폰 17 프로")
     assert legacy_issue_marker(10, "첫 검색") == "<!-- dgsearch:8d6eff7f2e0cfaae -->"
+
+
+def test_publish_results_comments_before_closing(monkeypatch):
+    calls = []
+    monkeypatch.setattr("scripts.process_issues.REPOSITORY", "owner/repo")
+    monkeypatch.setattr(
+        "scripts.process_issues.api",
+        lambda method, path, payload=None: calls.append((method, path, payload)),
+    )
+
+    publish_results_and_close(7, "result table")
+
+    assert calls == [
+        ("POST", "/repos/owner/repo/issues/7/comments", {"body": "result table"}),
+        ("PATCH", "/repos/owner/repo/issues/7", {"state": "closed"}),
+    ]

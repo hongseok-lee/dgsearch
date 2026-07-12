@@ -149,6 +149,15 @@ def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
     return "\n".join(lines)
 
 
+def publish_results_and_close(issue_number: int, body: str):
+    api("POST", f"/repos/{REPOSITORY}/issues/{issue_number}/comments", {"body": body})
+    close_issue(issue_number)
+
+
+def close_issue(issue_number: int):
+    api("PATCH", f"/repos/{REPOSITORY}/issues/{issue_number}", {"state": "closed"})
+
+
 def main():
     if not TOKEN or not REPOSITORY:
         raise RuntimeError("GITHUB_TOKEN and GITHUB_REPOSITORY are required")
@@ -158,21 +167,27 @@ def main():
             continue
         comments = api("GET", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments?per_page=100")
         comment_bodies = [comment.get("body") or "" for comment in comments]
+        processed_marker_seen = False
         for source_kind, source_id, keyword in sources_for_issue(issue, comments):
             source_marker = marker(source_kind, source_id, keyword)
             accepted_markers = [source_marker]
             if source_kind == "issue":
                 accepted_markers.append(legacy_issue_marker(source_id, keyword))
             if any(any(value in body for value in accepted_markers) for body in comment_bodies):
+                processed_marker_seen = True
                 continue
 
             items = unique_results(crawl(keyword, issue["number"]), keyword)
             body = format_comment(keyword, items, source_marker)
-            api("POST", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments", {"body": body})
+            publish_results_and_close(issue["number"], body)
             print(
                 f"processed {source_kind} {source_id} on issue #{issue['number']}: "
                 f"{len(items)} unique results"
             )
+            return
+        if processed_marker_seen:
+            close_issue(issue["number"])
+            print(f"closed previously processed issue #{issue['number']}")
             return
     print("no unprocessed open issues")
 

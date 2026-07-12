@@ -71,9 +71,17 @@ def crawl(keyword: str, issue_number: int) -> list[dict]:
     return [json.loads(line) for line in destination.read_text().splitlines() if line.strip()]
 
 
-def unique_results(items: list[dict]) -> list[dict]:
+def is_relevant(item: dict, keyword: str) -> bool:
+    haystack = " ".join((item.get("title") or "", item.get("content") or "")).casefold()
+    tokens = [token.casefold() for token in keyword.split() if token.strip()]
+    return bool(tokens) and all(token in haystack for token in tokens)
+
+
+def unique_results(items: list[dict], keyword: str) -> list[dict]:
     unique = {}
     for item in items:
+        if not is_relevant(item, keyword):
+            continue
         key = item.get("id") or item.get("href")
         if key and key not in unique:
             unique[key] = item
@@ -132,7 +140,7 @@ def main():
         if already_processed(issue["number"], issue_marker):
             continue
 
-        items = unique_results(crawl(keyword, issue["number"]))
+        items = unique_results(crawl(keyword, issue["number"]), keyword)
         body = format_comment(keyword, items, issue_marker)
         api("POST", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments", {"body": body})
         print(f"processed issue #{issue['number']}: {len(items)} unique results")

@@ -5,6 +5,7 @@ from scripts.process_issues import (
     main,
     marker,
     publish_results_and_close,
+    region_scope_label,
     sources_for_issue,
     unique_results,
 )
@@ -27,6 +28,15 @@ def test_format_comment_uses_markdown_table(monkeypatch):
     assert "| 가격 | 지역 | 매물 |" in body
     assert "| 1,250,000원 | 시흥동 | [폴드7 \\| 블루](https://example.com/item) |" in body
     assert "seller" not in body.lower()
+
+
+def test_zero_region_limit_is_rendered_as_all(monkeypatch):
+    monkeypatch.setattr("scripts.process_issues.MAX_REGIONS", "0")
+    assert region_scope_label() == "전체"
+
+    body = format_comment("자전거", [], "<!-- dgsearch:test -->")
+    assert "- 조회 지역: 전체" in body
+    assert "조회 지역 상한: 0개" not in body
 
 
 def test_relevance_requires_every_keyword_token():

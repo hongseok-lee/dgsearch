@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+from pathlib import Path
 from urllib.parse import urlencode
 
 import scrapy
@@ -37,13 +39,23 @@ class DaangnSpider(scrapy.Spider):
     allowed_domains = ["www.daangn.com"]
     handle_httpstatus_list = [403, 429]
 
-    def __init__(self, query="갤럭시 폴드 7", provinces="서울특별시,경기도", max_regions="0", **kwargs):
+    def __init__(
+        self,
+        query="갤럭시 폴드 7",
+        provinces="서울특별시,경기도",
+        max_regions="0",
+        progress_file="",
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.query = query
         self.provinces = {value.strip() for value in provinces.split(",") if value.strip()}
         self.max_regions = int(max_regions)
         self.regions: dict[int, dict] = {}
         self.pending_seed_requests = 0
+        self.progress_file = Path(progress_file) if progress_file else None
+        self.completed_regions = 0
+        self.total_regions = 0
 
     async def start(self):
         seeds = []
@@ -75,6 +87,7 @@ class DaangnSpider(scrapy.Spider):
             regions = list(self.regions.values())
             if self.max_regions > 0:
                 regions = regions[: self.max_regions]
+            self.total_regions = len(regions)
             self.logger.info("discovered %d regions; scheduling %d", len(self.regions), len(regions))
             for region in regions:
                 yield self.loader_request(region)
@@ -94,11 +107,14 @@ class DaangnSpider(scrapy.Spider):
         if response.status in {403, 429}:
             if attempt < 8:
                 yield self.loader_request(region, attempt + 1)
+            else:
+                self.report_region(region, [], f"loader status {response.status}")
             return
 
         data = response.json()
         if str(data.get("region", {}).get("id")) != str(region["id"]):
             self.logger.error("region mismatch wanted=%s got=%s", region["id"], data.get("region"))
+            self.report_region(region, [], "region mismatch")
             return
 
         pow_data = data["pow"]
@@ -121,8 +137,11 @@ class DaangnSpider(scrapy.Spider):
         if response.status in {403, 429}:
             if attempt < 8:
                 yield self.loader_request(region, attempt + 1)
+            else:
+                self.report_region(region, [], f"search status {response.status}")
             return
 
+        articles = []
         for article in response.json().get("fleamarketArticles", []):
             if not is_tradable(article):
                 continue
@@ -132,4 +151,25 @@ class DaangnSpider(scrapy.Spider):
                 "name1": region["name1"],
                 "name2": region["name2"],
             }
+            articles.append(article)
             yield article
+        self.report_region(region, articles)
+
+    def report_region(self, region, articles, error=None):
+        if self.progress_file is None:
+            return
+        self.completed_regions += 1
+        event = {
+            "completed": self.completed_regions,
+            "total": self.total_regions,
+            "region": {
+                "id": region["id"],
+                "name": region["name"],
+                "name1": region["name1"],
+                "name2": region["name2"],
+            },
+            "articles": articles,
+            "error": error,
+        }
+        with self.progress_file.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(event, ensure_ascii=False) + "\n")

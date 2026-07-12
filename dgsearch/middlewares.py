@@ -12,7 +12,7 @@ class RateLimitMiddleware:
 
     def __init__(
         self,
-        max_concurrency=8,
+        max_concurrency=16,
         window_size=40,
         min_samples=20,
         failure_rate=0.15,
@@ -28,7 +28,7 @@ class RateLimitMiddleware:
     @classmethod
     def from_crawler(cls, crawler):
         instance = cls(
-            max_concurrency=crawler.settings.getint("ADAPTIVE_CONCURRENCY_MAX", 8),
+            max_concurrency=crawler.settings.getint("ADAPTIVE_CONCURRENCY_MAX", 16),
             window_size=crawler.settings.getint("ADAPTIVE_CONCURRENCY_WINDOW", 40),
             min_samples=crawler.settings.getint("ADAPTIVE_CONCURRENCY_MIN_SAMPLES", 20),
             failure_rate=crawler.settings.getfloat("ADAPTIVE_CONCURRENCY_FAILURE_RATE", 0.15),

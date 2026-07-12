@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+
+import aiohttp
 
 from dgsearch.listings import is_tradable
 
@@ -19,25 +20,23 @@ MAX_RESULTS = int(os.getenv("DGSEARCH_MAX_COMMENT_RESULTS", "50"))
 TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 
 
-def api(method: str, path: str, payload=None):
-    data = json.dumps(payload).encode() if payload is not None else None
-    request = Request(
-        f"{API}{path}",
-        data=data,
-        method=method,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {TOKEN}",
-            "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "dgsearch-actions",
-        },
-    )
-    try:
-        with urlopen(request, timeout=30) as response:
-            return json.load(response)
-    except HTTPError as error:
-        detail = error.read().decode(errors="replace")
-        raise RuntimeError(f"GitHub API {error.code}: {detail}") from error
+async def api(session: aiohttp.ClientSession, method: str, path: str, payload=None):
+    async with session.request(method, f"{API}{path}", json=payload) as response:
+        if response.status >= 400:
+            detail = await response.text()
+            raise RuntimeError(f"GitHub API {response.status}: {detail}")
+        if response.status == 204:
+            return None
+        return await response.json()
+
+
+def github_headers():
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {TOKEN}",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "dgsearch-actions",
+    }
 
 
 def keyword_from_issue(issue: dict) -> str:
@@ -76,24 +75,60 @@ def latest_source_for_issue(issue: dict, comments: list[dict]):
     return sources[-1] if sources else None
 
 
-def crawl(keyword: str, issue_number: int) -> list[dict]:
+async def crawl_incrementally(keyword: str, issue_number: int, on_progress) -> list[dict]:
     output = Path("output")
     output.mkdir(exist_ok=True)
     destination = output / f"issue-{issue_number}.jsonl"
+    progress = output / f"issue-{issue_number}-progress.jsonl"
     destination.unlink(missing_ok=True)
-    subprocess.run(
+    progress.write_text("", encoding="utf-8")
+    process = await asyncio.create_subprocess_exec(
         [
             "scrapy", "crawl", "daangn",
             "-a", f"query={keyword}",
             "-a", "provinces=서울특별시,경기도",
             "-a", f"max_regions={MAX_REGIONS}",
+            "-a", f"progress_file={progress}",
             "-O", str(destination),
         ],
-        check=True,
     )
+    position = 0
+    try:
+        while process.returncode is None:
+            position = await consume_progress(progress, position, on_progress)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=0.25)
+            except TimeoutError:
+                pass
+        position = await consume_progress(progress, position, on_progress)
+        if process.returncode:
+            raise subprocess.CalledProcessError(process.returncode, "scrapy crawl daangn")
+    except BaseException:
+        if process.returncode is None:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), timeout=10)
+        raise
     if not destination.exists():
         return []
-    return [json.loads(line) for line in destination.read_text().splitlines() if line.strip()]
+    text = await asyncio.to_thread(destination.read_text)
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+
+async def consume_progress(path: Path, position: int, on_progress) -> int:
+    events, position = await asyncio.to_thread(read_progress, path, position)
+    for event in events:
+        await on_progress(event)
+    return position
+
+
+def read_progress(path: Path, position: int):
+    events = []
+    with path.open(encoding="utf-8") as stream:
+        stream.seek(position)
+        for line in stream:
+            if line.strip():
+                events.append(json.loads(line))
+        return events, stream.tell()
 
 
 def is_relevant(item: dict, keyword: str) -> bool:
@@ -125,7 +160,16 @@ def region_scope_label() -> str:
     return "전체" if int(MAX_REGIONS) == 0 else f"최대 {MAX_REGIONS}개"
 
 
-def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
+def format_comment(
+    keyword: str,
+    items: list[dict],
+    issue_marker: str,
+    *,
+    completed: int | None = None,
+    total: int | None = None,
+    failed: int = 0,
+    finished: bool = False,
+) -> str:
     shown = items[:MAX_RESULTS]
     lines = [
         issue_marker,
@@ -133,6 +177,8 @@ def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
         "",
         f"- 고유 매물: {len(items)}개",
         f"- 조회 지역: {region_scope_label()}",
+        f"- 진행: {progress_label(completed, total, finished)}",
+        f"- 실패 지역: {failed}개",
         f"- 댓글 표시: 최근 갱신 {len(shown)}개",
         "",
         "| 가격 | 지역 | 매물 |",
@@ -155,37 +201,131 @@ def format_comment(keyword: str, items: list[dict], issue_marker: str) -> str:
     return "\n".join(lines)
 
 
-def publish_results_and_close(issue_number: int, body: str):
-    api("POST", f"/repos/{REPOSITORY}/issues/{issue_number}/comments", {"body": body})
-    close_issue(issue_number)
+def progress_label(completed, total, finished):
+    if completed is None:
+        return "지역 목록 준비 중"
+    if finished:
+        return f"완료 ({completed}/{total or completed})"
+    return f"{completed}/{total or '?'}"
 
 
-def close_issue(issue_number: int):
-    api("PATCH", f"/repos/{REPOSITORY}/issues/{issue_number}", {"state": "closed"})
+async def create_result_comment(session, issue_number: int, body: str) -> int:
+    result = await api(
+        session,
+        "POST",
+        f"/repos/{REPOSITORY}/issues/{issue_number}/comments",
+        {"body": body},
+    )
+    return result["id"]
 
 
-def main():
+async def update_result_comment(session, comment_id: int, body: str):
+    await api(
+        session,
+        "PATCH",
+        f"/repos/{REPOSITORY}/issues/comments/{comment_id}",
+        {"body": body},
+    )
+
+
+async def close_issue(session, issue_number: int):
+    await api(
+        session,
+        "PATCH",
+        f"/repos/{REPOSITORY}/issues/{issue_number}",
+        {"state": "closed"},
+    )
+
+
+async def main():
     if not TOKEN or not REPOSITORY:
         raise RuntimeError("GITHUB_TOKEN and GITHUB_REPOSITORY are required")
-    issues = api("GET", f"/repos/{REPOSITORY}/issues?state=open&sort=created&direction=asc&per_page=100")
-    for issue in issues:
-        if "pull_request" in issue:
-            continue
-        comments = api("GET", f"/repos/{REPOSITORY}/issues/{issue['number']}/comments?per_page=100")
-        source = latest_source_for_issue(issue, comments)
-        if source is None:
-            continue
-        source_kind, source_id, keyword = source
-        items = unique_results(crawl(keyword, issue["number"]), keyword)
-        body = format_comment(keyword, items, marker(source_kind, source_id, keyword))
-        publish_results_and_close(issue["number"], body)
-        print(
-            f"processed open issue #{issue['number']} from {source_kind} {source_id}: "
-            f"{len(items)} unique results"
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(headers=github_headers(), timeout=timeout) as session:
+        issues = await api(
+            session,
+            "GET",
+            f"/repos/{REPOSITORY}/issues?state=open&sort=created&direction=asc&per_page=100",
         )
-        return
+        for issue in issues:
+            if "pull_request" in issue:
+                continue
+            comments = await api(
+                session,
+                "GET",
+                f"/repos/{REPOSITORY}/issues/{issue['number']}/comments?per_page=100",
+            )
+            source = latest_source_for_issue(issue, comments)
+            if source is None:
+                continue
+            await process_issue(session, issue, source)
+            return
     print("no unprocessed open issues")
 
 
+async def process_issue(session, issue, source):
+    source_kind, source_id, keyword = source
+    source_marker = marker(source_kind, source_id, keyword)
+    comment_id = await create_result_comment(
+        session,
+        issue["number"],
+        format_comment(keyword, [], source_marker),
+    )
+    found = {}
+    state = {"completed": 0, "total": None, "failed": 0}
+
+    async def on_progress(event):
+        state["completed"] = event["completed"]
+        state["total"] = event["total"]
+        state["failed"] += int(bool(event.get("error")))
+        for item in unique_results(event.get("articles", []), keyword):
+            key = item.get("id") or item.get("href")
+            if key:
+                found.setdefault(key, item)
+        await update_result_comment(
+            session,
+            comment_id,
+            format_comment(
+                keyword,
+                sorted_results(found.values()),
+                source_marker,
+                completed=state["completed"],
+                total=state["total"],
+                failed=state["failed"],
+            ),
+        )
+
+    items = unique_results(
+        await crawl_incrementally(keyword, issue["number"], on_progress),
+        keyword,
+    )
+    await update_result_comment(
+        session,
+        comment_id,
+        format_comment(
+            keyword,
+            items,
+            source_marker,
+            completed=state["completed"],
+            total=state["total"],
+            failed=state["failed"],
+            finished=True,
+        ),
+    )
+    await close_issue(session, issue["number"])
+    print(
+        f"processed open issue #{issue['number']} from {source_kind} {source_id}: "
+        f"{len(items)} unique results"
+    )
+
+
+def sorted_results(items):
+    return sorted(
+        items,
+        key=lambda item: item.get("boostedAt") or item.get("createdAt") or "",
+        reverse=True,
+    )
+
+
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

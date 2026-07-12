@@ -17,6 +17,8 @@ scrapy crawl daangn -a query='갤럭시 폴드 7'
 
 결과는 기본적으로 `output/results.jsonl`에 저장됩니다. 같은 매물이 여러 검색 지역에서 노출될 수 있으므로 후처리 시 `id` 또는 `href` 기준 중복 제거가 필요합니다.
 
+GitHub 이벤트 분기와 실행 인자 처리는 `python -m dgsearch.action`이 담당합니다. workflow YAML은 Python 환경 준비, 실행기 호출, artifact 업로드만 수행합니다.
+
 범위를 제한할 수 있습니다.
 
 ```bash

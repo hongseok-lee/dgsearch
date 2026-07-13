@@ -94,6 +94,12 @@ def test_trusted_user_comment_becomes_search_source():
             "author_association": "NONE",
             "user": {"login": "visitor"},
         },
+        {
+            "id": 23,
+            "body": "<!-- dgsearch:ack:comment:23 -->\n✅ 검색 요청을 접수했습니다.",
+            "author_association": "OWNER",
+            "user": {"login": "repo-owner"},
+        },
     ]
 
     assert sources_for_issue(issue, comments) == [

@@ -82,16 +82,22 @@ async def crawl_incrementally(keyword: str, issue_number: int, on_progress) -> l
     progress = output / f"issue-{issue_number}-progress.jsonl"
     destination.unlink(missing_ok=True)
     progress.write_text("", encoding="utf-8")
-    process = await asyncio.create_subprocess_exec(
-        [
-            "scrapy", "crawl", "daangn",
-            "-a", f"query={keyword}",
-            "-a", "provinces=서울특별시,경기도",
-            "-a", f"max_regions={MAX_REGIONS}",
-            "-a", f"progress_file={progress}",
-            "-O", str(destination),
-        ],
+    command = (
+        "scrapy",
+        "crawl",
+        "daangn",
+        "-a",
+        f"query={keyword}",
+        "-a",
+        "provinces=서울특별시,경기도",
+        "-a",
+        f"max_regions={MAX_REGIONS}",
+        "-a",
+        f"progress_file={progress}",
+        "-O",
+        str(destination),
     )
+    process = await asyncio.create_subprocess_exec(*command)
     position = 0
     try:
         while process.returncode is None:

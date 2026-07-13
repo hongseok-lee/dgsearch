@@ -2,6 +2,7 @@ import asyncio
 
 from scripts.process_issues import (
     consume_progress,
+    crawl_incrementally,
     format_comment,
     is_relevant,
     latest_source_for_issue,
@@ -124,6 +125,48 @@ def test_consume_progress_reads_only_new_lines(tmp_path):
     asyncio.run(consume_progress(path, position, collect))
 
     assert events == [{"completed": 1}, {"completed": 2}]
+
+
+def test_crawl_incrementally_passes_subprocess_arguments_separately(monkeypatch, tmp_path):
+    calls = []
+
+    class FinishedProcess:
+        returncode = 0
+
+    async def fake_create_subprocess_exec(*args):
+        calls.append(args)
+        return FinishedProcess()
+
+    async def ignore_progress(_event):
+        pass
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("scripts.process_issues.MAX_REGIONS", "0")
+    monkeypatch.setattr(
+        "scripts.process_issues.asyncio.create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    result = asyncio.run(crawl_incrementally("갤럭시 폴드 7", 7, ignore_progress))
+
+    assert result == []
+    assert calls == [
+        (
+            "scrapy",
+            "crawl",
+            "daangn",
+            "-a",
+            "query=갤럭시 폴드 7",
+            "-a",
+            "provinces=서울특별시,경기도",
+            "-a",
+            "max_regions=0",
+            "-a",
+            "progress_file=output/issue-7-progress.jsonl",
+            "-O",
+            "output/issue-7.jsonl",
+        )
+    ]
 
 
 def test_open_issue_is_searched_even_when_old_result_marker_exists(monkeypatch):

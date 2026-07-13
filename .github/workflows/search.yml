@@ -1,6 +1,9 @@
 name: Search Daangn regions
 
 on:
+  schedule:
+    # Recovery sweep for queued/running requests left by cancellations or replaced pending runs.
+    - cron: "17,47 * * * *"
   issues:
     types: [opened, reopened]
   issue_comment:
@@ -8,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       process_open_issue:
-        description: Process the oldest unhandled open issue instead of a direct crawl
+        description: Drain queued issue requests instead of a direct crawl
         required: true
         type: boolean
         default: false
@@ -64,6 +67,7 @@ jobs:
     if: >-
       always() && (
         github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'schedule' ||
         (github.event_name == 'issues' &&
           github.event.sender.type != 'Bot' && (
             github.event.issue.author_association == 'OWNER' ||
@@ -84,8 +88,9 @@ jobs:
     concurrency:
       group: dgsearch-issue-worker
       cancel-in-progress: false
-    # GitHub-hosted jobs have a hard execution limit of 6 hours.
-    timeout-minutes: 360
+      queue: max
+    # Leave time after the Python worker budget for status and artifact finalization.
+    timeout-minutes: 330
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -105,12 +110,18 @@ jobs:
             -a "query=$SEARCH_QUERY" \
             -a "provinces=$SEARCH_PROVINCES" \
             -a "max_regions=$SEARCH_MAX_REGIONS"
-      - name: Process oldest unhandled open issue
-        if: github.event_name == 'issues' || github.event_name == 'issue_comment' || inputs.process_open_issue
+      - name: Drain queued issue requests
+        if: github.event_name == 'issues' || github.event_name == 'issue_comment' || github.event_name == 'schedule' || inputs.process_open_issue
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DGSEARCH_MAX_REGIONS: ${{ github.event_name == 'workflow_dispatch' && inputs.max_regions || '0' }}
           DGSEARCH_MAX_COMMENT_RESULTS: "50"
+          DGSEARCH_PROGRESS_UPDATE_INTERVAL_SECONDS: "30"
+          DGSEARCH_MAX_REQUESTS_PER_RUN: "3"
+          DGSEARCH_REQUEST_TIMEOUT_SECONDS: "9000"
+          DGSEARCH_WORKER_BUDGET_SECONDS: "18000"
+          DGSEARCH_WORKER_CLEANUP_RESERVE_SECONDS: "900"
+          DGSEARCH_ACK_GRACE_SECONDS: "60"
         run: python scripts/process_issues.py
       - name: Upload results
         if: always()

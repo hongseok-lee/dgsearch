@@ -40,7 +40,10 @@ async function acknowledge({ github, context, core }) {
     issue_number: issueNumber,
     body: [
       marker,
+      "<!-- dgsearch:state:queued -->",
       "✅ 검색 요청을 접수했습니다.",
+      "",
+      "검색 worker가 비는 즉시 이 댓글에 진행 상황과 결과를 갱신합니다.",
       "",
       `[Actions 실행 상태 보기](${runUrl})`,
     ].join("\n"),

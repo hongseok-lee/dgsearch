@@ -58,7 +58,10 @@ test("creates one ACK on the triggering issue", async () => {
     created[0].body,
     [
       "<!-- dgsearch:ack:issue:10:opened:2026-07-13T18:00:00Z -->",
+      "<!-- dgsearch:state:queued -->",
       "✅ 검색 요청을 접수했습니다.",
+      "",
+      "검색 worker가 비는 즉시 이 댓글에 진행 상황과 결과를 갱신합니다.",
       "",
       "[Actions 실행 상태 보기](https://github.com/owner/dgsearch/actions/runs/1234)",
     ].join("\n"),
@@ -87,7 +90,12 @@ test("does not duplicate an existing bot ACK after pagination", async () => {
   }));
   comments.push({
     id: 101,
-    body: `${marker}\n✅ 검색 요청을 접수했습니다.`,
+    body: [
+      marker,
+      "<!-- dgsearch:result-marker -->",
+      "<!-- dgsearch:state:completed -->",
+      "✅ 완료",
+    ].join("\n"),
     user: { login: "github-actions[bot]" },
   });
   const { github, created } = fakeGithub(comments);

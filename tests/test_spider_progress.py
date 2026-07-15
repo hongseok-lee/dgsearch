@@ -1,4 +1,5 @@
 import json
+from urllib.parse import parse_qs, urlparse
 
 from scrapy.http import Request, TextResponse
 
@@ -51,3 +52,37 @@ def test_spider_skips_checkpointed_regions_and_reports_cumulative_progress():
     assert spider.completed_regions == 1
     assert len(requests) == 1
     assert requests[0].cb_kwargs["region"]["id"] == 2
+    assert parse_qs(urlparse(requests[0].url).query)["only_on_sale"] == ["true"]
+
+
+def test_search_api_requests_only_tradable_listings():
+    spider = DaangnSpider(query="제습기")
+    region = {
+        "id": 6035,
+        "name": "역삼동",
+        "name1": "서울특별시",
+        "name2": "강남구",
+    }
+    request = spider.loader_request(region)
+    response = TextResponse(
+        request=request,
+        url=request.url,
+        body=json.dumps(
+            {
+                "region": {"id": 6035},
+                "pow": {
+                    "uri": "https://www.daangn.com/kr/buy-sell/s/",
+                    "challenge": "test",
+                    "difficulty": 0,
+                    "expiresAt": 123,
+                },
+            }
+        ).encode(),
+        headers={"Content-Type": "application/json"},
+        encoding="utf-8",
+    )
+
+    [search_request] = list(spider.parse_loader(response, region, 0))
+    query = parse_qs(urlparse(search_request.url).query)
+
+    assert query["only_on_sale"] == ["true"]

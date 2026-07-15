@@ -105,7 +105,13 @@ class DaangnSpider(scrapy.Spider):
                 yield self.loader_request(region)
 
     def loader_request(self, region, attempt=0):
-        params = urlencode({"in": f"{region['name']}-{region['id']}", "search": self.query})
+        params = urlencode(
+            {
+                "in": f"{region['name']}-{region['id']}",
+                "only_on_sale": "true",
+                "search": self.query,
+            }
+        )
         page_url = f"https://www.daangn.com/kr/buy-sell/s/?{params}"
         loader_url = f"{page_url}&_data={urlencode({'x': 'routes/kr.buy-sell.s'})[2:]}"
         return scrapy.Request(
@@ -133,6 +139,7 @@ class DaangnSpider(scrapy.Spider):
         params = urlencode({
             "region_id": region["id"],
             "search": self.query,
+            "only_on_sale": "true",
             "uri": pow_data["uri"],
             "nonce": solve_pow(pow_data["challenge"], pow_data["difficulty"]),
             "expires_at": pow_data["expiresAt"],

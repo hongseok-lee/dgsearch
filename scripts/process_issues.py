@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
 import subprocess
 import sys
 import time
+import zlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +26,7 @@ MAX_RESULTS = int(os.getenv("DGSEARCH_MAX_COMMENT_RESULTS", "50"))
 PROGRESS_UPDATE_INTERVAL = float(os.getenv("DGSEARCH_PROGRESS_UPDATE_INTERVAL_SECONDS", "30"))
 MAX_REQUESTS_PER_RUN = int(os.getenv("DGSEARCH_MAX_REQUESTS_PER_RUN", "3"))
 REQUEST_TIMEOUT_SECONDS = float(os.getenv("DGSEARCH_REQUEST_TIMEOUT_SECONDS", "9000"))
+MAX_HANDOFFS = int(os.getenv("DGSEARCH_MAX_HANDOFFS", "12"))
 WORKER_BUDGET_SECONDS = float(os.getenv("DGSEARCH_WORKER_BUDGET_SECONDS", "18000"))
 WORKER_CLEANUP_RESERVE_SECONDS = float(os.getenv("DGSEARCH_WORKER_CLEANUP_RESERVE_SECONDS", "900"))
 ACK_GRACE_SECONDS = float(os.getenv("DGSEARCH_ACK_GRACE_SECONDS", "60"))
@@ -34,10 +37,60 @@ BOT_LOGINS = {"github-actions", "github-actions[bot]"}
 TERMINAL_STATES = {"completed", "failed", "superseded"}
 SUMMARY_PATH = Path("output/run-summary.jsonl")
 RETRYABLE_API_STATUSES = {403, 429, 500, 502, 503, 504}
+CHECKPOINT_PREFIX = "<!-- dgsearch:checkpoint:"
 
 
 class RecoverableAPIError(RuntimeError):
     pass
+
+
+def empty_checkpoint() -> dict:
+    return {"version": 1, "region_ids": [], "items": [], "failed": 0, "total": None, "handoffs": 0}
+
+
+def checkpoint_from_comment(comment: dict | None) -> dict:
+    if not comment:
+        return empty_checkpoint()
+    for line in (comment.get("body") or "").splitlines():
+        candidate = line.strip()
+        if not candidate.startswith(CHECKPOINT_PREFIX) or not candidate.endswith(" -->"):
+            continue
+        encoded = candidate.removeprefix(CHECKPOINT_PREFIX).removesuffix(" -->")
+        try:
+            padding = "=" * (-len(encoded) % 4)
+            payload = zlib.decompress(base64.urlsafe_b64decode(encoded + padding))
+            checkpoint = json.loads(payload)
+        except (ValueError, TypeError, zlib.error, json.JSONDecodeError):
+            return empty_checkpoint()
+        if checkpoint.get("version") == 1:
+            return {**empty_checkpoint(), **checkpoint}
+    return empty_checkpoint()
+
+
+def checkpoint_marker(checkpoint: dict) -> str:
+    compact = {
+        **checkpoint,
+        "items": [compact_checkpoint_item(item) for item in checkpoint["items"]],
+    }
+    payload = json.dumps(compact, ensure_ascii=False, separators=(",", ":")).encode()
+    encoded = base64.urlsafe_b64encode(zlib.compress(payload, level=9)).decode().rstrip("=")
+    return f"{CHECKPOINT_PREFIX}{encoded} -->"
+
+
+def compact_checkpoint_item(item: dict) -> dict:
+    fields = (
+        "id",
+        "title",
+        "price",
+        "region",
+        "regionId",
+        "href",
+        "status",
+        "createdAt",
+        "boostedAt",
+        "matchedSearchRegion",
+    )
+    return {field: item[field] for field in fields if field in item}
 
 
 @dataclass(frozen=True)
@@ -432,6 +485,7 @@ async def crawl_incrementally(
     on_progress,
     *,
     output_key: str | None = None,
+    skip_region_ids: set[int] | None = None,
 ) -> list[dict]:
     output = Path("output")
     output.mkdir(exist_ok=True)
@@ -454,6 +508,8 @@ async def crawl_incrementally(
         f"max_regions={MAX_REGIONS}",
         "-a",
         f"progress_file={progress}",
+        "-a",
+        "skip_region_ids=" + ",".join(str(value) for value in sorted(skip_region_ids or set())),
         "-O",
         str(destination),
     )
@@ -546,6 +602,7 @@ def status_label(status: str) -> str:
         "completed": "✅ 완료",
         "failed": "❌ 실패",
         "interrupted": "⏳ 자동 재시도 대기",
+        "continuing": "⏭️ 다음 실행으로 이어가는 중",
     }[status]
 
 
@@ -562,11 +619,13 @@ def format_comment(
     eta_seconds: float | None = None,
     run_url: str | None = None,
     error_type: str | None = None,
+    checkpoint: dict | None = None,
 ) -> str:
     shown = items[:MAX_RESULTS]
     markers = [request_markers] if isinstance(request_markers, str) else request_markers
     lines = [
         *markers,
+        *([checkpoint_marker(checkpoint)] if checkpoint else []),
         f"<!-- dgsearch:state:{status} -->",
         f"`{keyword}` 서울·경기 검색 결과입니다.",
         "",
@@ -579,7 +638,7 @@ def format_comment(
         f"- 마지막 갱신: {updated_at or utc_timestamp()}",
         "",
     ]
-    if status == "running":
+    if status in {"running", "continuing"}:
         lines.insert(-1, f"- 예상 남은 시간: {eta_label(eta_seconds)}")
     if run_url:
         lines.insert(-1, f"- 실행: [GitHub Actions]({run_url})")
@@ -596,6 +655,13 @@ def format_comment(
         lines.extend(
             [
                 "> GitHub API 일시 오류로 중단되었습니다. 다음 worker가 자동 재시도합니다.",
+                "",
+            ]
+        )
+    if status == "continuing":
+        lines.extend(
+            [
+                "> 실행 시간 한도 전에 체크포인트를 저장했습니다. 다음 Action이 남은 지역부터 자동으로 이어갑니다.",
                 "",
             ]
         )
@@ -624,7 +690,7 @@ def progress_label(completed, total, status):
         return "지역 목록 준비 중"
     if status == "completed":
         return f"완료 ({completed}/{total or completed})"
-    if status in {"failed", "interrupted"}:
+    if status in {"failed", "interrupted", "continuing"}:
         return f"중단 ({completed}/{total or '?'})"
     return f"{completed}/{total or '?'}"
 
@@ -712,6 +778,7 @@ class ProgressReporter:
         issue_number: int,
         metrics: RunMetrics,
         *,
+        checkpoint: dict | None = None,
         interval: float = PROGRESS_UPDATE_INTERVAL,
         clock=time.monotonic,
     ):
@@ -725,17 +792,27 @@ class ProgressReporter:
         self.clock = clock
         self.started_at = clock()
         self.last_progress_update_at = None
-        self.completed = 0
-        self.total = None
-        self.failed = 0
+        checkpoint = checkpoint or empty_checkpoint()
+        self.completed_region_ids = {int(value) for value in checkpoint["region_ids"]}
+        self.completed = len(self.completed_region_ids)
+        self.total = checkpoint["total"]
+        self.failed = int(checkpoint["failed"])
+        self.handoffs = int(checkpoint["handoffs"])
         self.raw_progress_events = 0
         self.progress_comment_updates = 0
         self.terminal_comment_updates = 0
-        self.found = {}
+        self.found = {
+            item.get("id") or item.get("href"): item
+            for item in checkpoint["items"]
+            if item.get("id") or item.get("href")
+        }
 
     def apply(self, event: dict) -> None:
         self.raw_progress_events += 1
-        self.completed = event["completed"]
+        region_id = event.get("region", {}).get("id")
+        if region_id is not None:
+            self.completed_region_ids.add(int(region_id))
+        self.completed = max(event["completed"], len(self.completed_region_ids))
         self.total = event["total"]
         self.failed += int(bool(event.get("error")))
         for item in unique_results(event.get("articles", []), self.keyword):
@@ -783,6 +860,7 @@ class ProgressReporter:
                 eta_seconds=self.eta_seconds(now),
                 run_url=github_run_url(),
                 error_type=error_type,
+                checkpoint=self.checkpoint(),
             ),
         )
         if status == "running":
@@ -807,27 +885,42 @@ class ProgressReporter:
             regions_per_minute=(round(self.completed / elapsed * 60, 3) if elapsed > 0 else None),
         )
 
+    def checkpoint(self) -> dict:
+        return {
+            "version": 1,
+            "region_ids": sorted(self.completed_region_ids),
+            "items": sorted_results(self.found.values()),
+            "failed": self.failed,
+            "total": self.total,
+            "handoffs": self.handoffs,
+        }
+
 
 async def prepare_status_comment(
     session,
     issue: dict,
     source: tuple[str, int, str],
     existing: dict | None,
-) -> tuple[int, list[str]]:
+) -> tuple[int, list[str], dict]:
     source_kind, source_id, keyword = source
     source_marker = marker(source_kind, source_id, keyword)
     markers = status_markers(existing, source_marker)
+    checkpoint = checkpoint_from_comment(existing)
     body = format_comment(
         keyword,
-        [],
+        checkpoint["items"],
         markers,
         status="running",
         run_url=github_run_url(),
+        completed=len(checkpoint["region_ids"]),
+        total=checkpoint["total"],
+        failed=checkpoint["failed"],
+        checkpoint=checkpoint,
     )
     if existing:
         await update_result_comment(session, existing["id"], body)
-        return existing["id"], markers
-    return await create_result_comment(session, issue["number"], body), markers
+        return existing["id"], markers, checkpoint
+    return await create_result_comment(session, issue["number"], body), markers, checkpoint
 
 
 def failed_comments_superseded_by(
@@ -901,6 +994,17 @@ async def should_close_issue(session, issue_number: int) -> bool:
     )
 
 
+async def dispatch_continuation(session) -> None:
+    workflow = os.getenv("GITHUB_WORKFLOW_FILE", "search.yml")
+    ref = os.getenv("GITHUB_REF_NAME", "main")
+    await api(
+        session,
+        "POST",
+        f"/repos/{REPOSITORY}/actions/workflows/{workflow}/dispatches",
+        {"ref": ref, "inputs": {"process_open_issue": True, "max_regions": MAX_REGIONS}},
+    )
+
+
 async def process_issue(
     session,
     request: PendingRequest,
@@ -931,7 +1035,7 @@ async def process_issue(
         async with asyncio.timeout(request_timeout_seconds):
             if issue.get("state") == "closed":
                 await reopen_issue(session, issue["number"])
-            comment_id, markers = await prepare_status_comment(
+            comment_id, markers, checkpoint = await prepare_status_comment(
                 session, issue, request.source, request.status_comment
             )
             reporter = ProgressReporter(
@@ -941,15 +1045,19 @@ async def process_issue(
                 markers,
                 issue["number"],
                 metrics,
+                checkpoint=checkpoint,
                 clock=reporter_clock,
             )
-            crawled = await crawl_incrementally(
+            await crawl_incrementally(
                 keyword,
                 issue["number"],
                 reporter.on_progress,
                 output_key=f"{source_kind}-{source_id}",
+                skip_region_ids=reporter.completed_region_ids,
             )
-            items = unique_results(crawled, keyword)
+            # Progress events already merged current results into the restored checkpoint.
+            # Keep prior-run results when this continuation reaches completion.
+            items = sorted_results(reporter.found.values())
             await reporter.publish("completed", items=items)
             await supersede_resolved_failures(session, issue, request.source)
             if await should_close_issue(session, issue["number"]):
@@ -983,6 +1091,32 @@ async def process_issue(
         )
         raise
     except Exception as error:
+        timed_out_with_progress = (
+            isinstance(error, TimeoutError)
+            and reporter is not None
+            and reporter.total is not None
+            and reporter.completed < reporter.total
+            and reporter.handoffs < MAX_HANDOFFS
+        )
+        if timed_out_with_progress:
+            reporter.handoffs += 1
+            await reporter.publish("continuing", error_type=type(error).__name__)
+            await dispatch_continuation(session)
+            metrics.emit(
+                "request_finished",
+                outcome="continuing",
+                selected_issue_number=issue["number"],
+                source_kind=source_kind,
+                source_id=source_id,
+                completed_regions=reporter.completed,
+                total_regions=reporter.total,
+                handoffs=reporter.handoffs,
+            )
+            print(
+                f"checkpointed issue #{issue['number']} at "
+                f"{reporter.completed}/{reporter.total}; dispatched continuation"
+            )
+            return True
         recoverable = isinstance(error, RecoverableAPIError)
         if reporter is not None:
             try:

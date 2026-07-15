@@ -31,6 +31,7 @@ on:
 permissions:
   contents: read
   issues: write
+  actions: write
 
 jobs:
   acknowledge:
@@ -118,10 +119,13 @@ jobs:
           DGSEARCH_MAX_COMMENT_RESULTS: "50"
           DGSEARCH_PROGRESS_UPDATE_INTERVAL_SECONDS: "30"
           DGSEARCH_MAX_REQUESTS_PER_RUN: "3"
-          DGSEARCH_REQUEST_TIMEOUT_SECONDS: "9000"
+          # Handoff at four hours, leaving ample time before the hosted-runner limit.
+          DGSEARCH_REQUEST_TIMEOUT_SECONDS: "14400"
           DGSEARCH_WORKER_BUDGET_SECONDS: "18000"
           DGSEARCH_WORKER_CLEANUP_RESERVE_SECONDS: "900"
           DGSEARCH_ACK_GRACE_SECONDS: "60"
+          DGSEARCH_MAX_HANDOFFS: "12"
+          GITHUB_WORKFLOW_FILE: "search.yml"
         run: python scripts/process_issues.py
       - name: Upload results
         if: always()

@@ -45,6 +45,7 @@ class DaangnSpider(scrapy.Spider):
         provinces="서울특별시,경기도",
         max_regions="0",
         progress_file="",
+        skip_region_ids="",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -54,6 +55,9 @@ class DaangnSpider(scrapy.Spider):
         self.regions: dict[int, dict] = {}
         self.pending_seed_requests = 0
         self.progress_file = Path(progress_file) if progress_file else None
+        self.skip_region_ids = {
+            int(value) for value in skip_region_ids.split(",") if value.strip()
+        }
         self.completed_regions = 0
         self.total_regions = 0
 
@@ -88,7 +92,15 @@ class DaangnSpider(scrapy.Spider):
             if self.max_regions > 0:
                 regions = regions[: self.max_regions]
             self.total_regions = len(regions)
-            self.logger.info("discovered %d regions; scheduling %d", len(self.regions), len(regions))
+            skipped = [region for region in regions if region["id"] in self.skip_region_ids]
+            regions = [region for region in regions if region["id"] not in self.skip_region_ids]
+            self.completed_regions = len(skipped)
+            self.logger.info(
+                "discovered %d regions; skipping %d completed; scheduling %d",
+                len(self.regions),
+                len(skipped),
+                len(regions),
+            )
             for region in regions:
                 yield self.loader_request(region)
 

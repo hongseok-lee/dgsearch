@@ -12,6 +12,8 @@ from scripts.process_issues import (
     RunMetrics,
     api,
     consume_progress,
+    checkpoint_from_comment,
+    checkpoint_marker,
     crawl_incrementally,
     drain_pending_requests,
     failed_comments_superseded_by,
@@ -193,11 +195,40 @@ def test_crawl_incrementally_passes_subprocess_arguments_separately(monkeypatch,
             "-a",
             "max_regions=0",
             "-a",
-            "progress_file=output/issue-7-comment-22-progress.jsonl",
-            "-O",
+                "progress_file=output/issue-7-comment-22-progress.jsonl",
+                "-a",
+                "skip_region_ids=",
+                "-O",
             "output/issue-7-comment-22.jsonl",
         )
     ]
+
+
+def test_checkpoint_round_trip_is_compressed_and_keeps_only_listing_fields():
+    checkpoint = {
+        "version": 1,
+        "region_ids": [1, 2],
+        "items": [
+            {
+                "id": "live",
+                "title": "제습기",
+                "status": "Ongoing",
+                "href": "https://example.com/live",
+                "seller": {"id": "private"},
+            }
+        ],
+        "failed": 1,
+        "total": 10,
+        "handoffs": 2,
+    }
+
+    marker_body = checkpoint_marker(checkpoint)
+    restored = checkpoint_from_comment({"body": marker_body})
+
+    assert restored["region_ids"] == [1, 2]
+    assert restored["handoffs"] == 2
+    assert restored["items"][0]["id"] == "live"
+    assert "seller" not in restored["items"][0]
 
 
 def test_stop_subprocess_escalates_from_terminate_to_kill():
@@ -799,6 +830,76 @@ def test_process_failure_reuses_ack_and_marks_same_comment_failed(monkeypatch):
     assert "- 상태: ❌ 실패" in updates[-1][2]["body"]
     assert not [call for call in calls if call[1].endswith("/issues/7")]
     assert metrics.records[-1][1]["outcome"] == "failure"
+
+
+def test_timeout_checkpoints_and_dispatches_continuation(monkeypatch):
+    ack_marker = "<!-- dgsearch:ack:issue:10:opened:2026-07-13T10:00:00Z -->"
+    issue = {
+        "id": 10,
+        "number": 7,
+        "body": "제습기",
+        "author_association": "OWNER",
+        "state": "open",
+    }
+    ack = {
+        "id": 21,
+        "body": f"{ack_marker}\n<!-- dgsearch:state:queued -->",
+        "user": {"login": "github-actions[bot]"},
+    }
+    request = PendingRequest(
+        issue=issue,
+        comments=[ack],
+        source=("issue", 10, "제습기"),
+        status_comment=ack,
+        identity=ack_marker,
+    )
+    calls = []
+
+    async def fake_api(session, method, path, payload=None):
+        calls.append((method, path, payload))
+        return {}
+
+    async def timed_out_crawl(keyword, issue_number, on_progress, **kwargs):
+        await on_progress(
+            {
+                "completed": 1,
+                "total": 1858,
+                "region": {"id": 101},
+                "articles": [],
+                "error": None,
+            }
+        )
+        raise TimeoutError
+
+    class Metrics:
+        context = {"trigger_issue_number": 7}
+
+        def __init__(self):
+            self.records = []
+
+        def emit(self, record_type, **fields):
+            self.records.append((record_type, fields))
+
+    monkeypatch.setattr("scripts.process_issues.REPOSITORY", "owner/repo")
+    monkeypatch.setattr("scripts.process_issues.api", fake_api)
+    monkeypatch.setattr("scripts.process_issues.crawl_incrementally", timed_out_crawl)
+
+    result = asyncio.run(process_issue(object(), request, Metrics()))
+
+    assert result is True
+    updates = [call for call in calls if "/issues/comments/21" in call[1]]
+    assert "<!-- dgsearch:state:continuing -->" in updates[-1][2]["body"]
+    restored = checkpoint_from_comment({"body": updates[-1][2]["body"]})
+    assert restored["region_ids"] == [101]
+    assert restored["handoffs"] == 1
+    dispatches = [call for call in calls if "/actions/workflows/search.yml/dispatches" in call[1]]
+    assert dispatches == [
+        (
+            "POST",
+            "/repos/owner/repo/actions/workflows/search.yml/dispatches",
+            {"ref": "main", "inputs": {"process_open_issue": True, "max_regions": "0"}},
+        )
+    ]
 
 
 def test_request_timeout_covers_status_preparation(monkeypatch):
